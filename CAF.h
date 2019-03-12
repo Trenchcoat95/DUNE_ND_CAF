@@ -43,7 +43,8 @@ public:
   double pileup_energy;
 
   // Gas TPC variables
-  int gastpc_pi_min_mult, gastpc_pi_pl_mult;
+  int gastpc_pi_min_mult, gastpc_pi_pl_mult,gastpc_pdg;
+  double gastpc_p_true, gastpc_p_recon, gastpc_m; 
 
   // reweights -- make sure big enough to hold all the variations for each knob, and all the knobs
   // the names, and what they actually mean, are determined automatically from the fhicl input file
