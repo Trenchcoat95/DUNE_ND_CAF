@@ -68,7 +68,9 @@ CAF::CAF( std::string filename, bool isGas )
   cafMVA->Branch( "vtx_x", &vtx_x, "vtx_x/D" );
   cafMVA->Branch( "vtx_y", &vtx_y, "vtx_y/D" );
   cafMVA->Branch( "vtx_z", &vtx_z, "vtx_z/D" );
-
+  //cafMVA->Branch( "fsPx", &fsPx, "fsPx/D" );
+  //cafMVA->Branch( "fsPy", &fsPy, "fsPy/D"  );
+  //cafMVA->Branch( "fsPz", &fsPz, "fsPz/D"  ); 
   cafMVA->Branch( "Ev_reco", &Ev_reco, "Ev_reco/D" );
   cafMVA->Branch( "Elep_reco", &Elep_reco, "Elep_reco/D" );
   cafMVA->Branch( "theta_reco", &theta_reco, "theta_reco/D" );
@@ -87,10 +89,14 @@ CAF::CAF( std::string filename, bool isGas )
   if( isGas ) {
     cafMVA->Branch( "gastpc_pi_pl_mult", &gastpc_pi_pl_mult, "gastpc_pi_pl_mult/I" );
     cafMVA->Branch( "gastpc_pi_min_mult", &gastpc_pi_min_mult, "gastpc_pi_min_mult/I" );
-    cafMVA->Branch( "p_recon_gen", &gastpc_p_recon, "p_recon_gen/D" );
-    cafMVA->Branch( "p_true_gen", &gastpc_p_true, "p_true_gen/D" );
-    cafMVA->Branch( "pdg_gen", &gastpc_pdg, "pdg_gen/D" );
-    cafMVA->Branch( "m_recon_gen", &gastpc_m, "m_recon_gen/D" ); 
+    cafMVA->Branch( "nFSP", &nFSP, "nFSP/I" );
+    cafMVA->Branch( "pdg", pdg, "pdg[nFSP]/I" );    
+    cafMVA->Branch( "trkLen", trkLen, "trkLen[nFSP]/D" );    
+    cafMVA->Branch( "trkLenPerp", trkLenPerp, "trkLenPerp[nFSP]/D" );
+    cafMVA->Branch( "partEvReco", partEvReco, "partEvReco[nFSP]/D" );    
+ 
+  
+   
   }
 
   genie->Branch( "genie_record", &mcrec );
@@ -162,10 +168,8 @@ void CAF::setToBS()
 
   gastpc_pi_pl_mult = 0;
   gastpc_pi_min_mult = 0;
-  gastpc_m = 0.0;
-  gastpc_pdg = 0.0;
-  gastpc_p_true = 0.0;
-  gastpc_p_recon = 0.0;
+  nFSP = 0;
+  //fsPx = 0.0; fsPy = 0; fsPz = 0; 
   for( int i = 0; i < 100; ++i ) {
     nwgt[i] = 0;
     cvwgt[i] = 1.;
@@ -173,6 +177,12 @@ void CAF::setToBS()
     for( int j = 0; j < 100; ++j ) {
       wgt[i][j] = 1.;
     }
+    //fsPx[i] = 0.; 
+    //fsPy[i] = 0.; 
+    //fsPz[i] = 0.; 
+    trkLen[i] = 0.;
+    trkLenPerp[i] = 0;
+    partEvReco[i] = 0.;
   }
 }
 
