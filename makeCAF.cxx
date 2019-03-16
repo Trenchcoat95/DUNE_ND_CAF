@@ -208,7 +208,10 @@ void loop( CAF &caf, params &par, TTree * tree, std::string ghepdir, std::string
   tree->SetBranchAddress( "muonExitMom", muonExitMom );
   tree->SetBranchAddress( "nFS", &nFS );
   tree->SetBranchAddress( "fsPdg", fsPdg );
-  
+  tree->SetBranchAddress( "fsPx", fsPx );
+  tree->SetBranchAddress( "fsPy", fsPy );
+  tree->SetBranchAddress( "fsPz", fsPz );
+
  
   tree->SetBranchAddress( "fsE", fsE );
   tree->SetBranchAddress( "fsTrkLen", fsTrkLen );
