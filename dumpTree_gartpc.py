@@ -1,504 +1,666 @@
-#!/usr/bin/env python
+#include "CAF.C"
+#include "TRandom3.h"
+#include "TFile.h"
+#include "TTree.h"
+#include "TVector3.h"
+#include "TLorentzVector.h"
+#include "Ntuple/NtpMCEventRecord.h"
+#include "EVGCore/EventRecord.h"
+#include "nusystematics/artless/response_helper.hh"
+#include <stdio.h>
 
-import sys
-import os.path
-import os
-import ROOT
-from optparse import OptionParser
-from array import array
+TRandom3 * rando;
+const double mmu = 0.1056583745;
+TF1 * tsmear; // angular resolution function
 
-gar_active_vols = ["GArTPC", "TPCChamber", "TPCGas", "cent_elec_shape", "cent_hc_shape", "TPC1_shape", "TPC1pad_shape", "TPC1fc_pvf_shape", "TPC1fc_kev_shape", "TPC2_shape", "TPC2pad_shape", "TPC2fc_pvf_shape", "TPC2fc_kev_shape", "TPC2fc_hc_shape"]
+// params will be extracted from command line, and passed to the reconstruction
+struct params {
+  double OA_xcoord;
+  bool fhc, grid, IsGasTPC;
+  int seed, run, subrun, first, n, nfiles;
+  double trk_muRes, LAr_muRes, ECAL_muRes;
+  double em_const, em_sqrtE;
+  double michelEff;
+  double CC_trk_length;
+  double pileup_frac, pileup_max;
+  double gastpc_len;
+//new parameters for adding the Gluckstern reconstruction 
+  double sig_x, bfield, x_0, trans_len; 
+};
 
-def loop( events, tgeo, tout, nfiles, okruns ):
+//gas TPC momentum reconstruction using the Gluckstern formula 
+// decided not to do this with a function definition
+
+// Fill reco variables for muon reconstructed in magnetized tracker
+void recoMuonTracker( CAF &caf, params &par )
+{
+  // smear momentum by resolution
+  double p = sqrt(caf.LepE*caf.LepE - mmu*mmu);
+  double reco_p = rando->Gaus( p, p*par.trk_muRes );
+  caf.Elep_reco = sqrt(reco_p*reco_p + mmu*mmu);
+
+  double true_tx = 1000.*atan(caf.LepMomX / caf.LepMomZ);
+  double true_ty = 1000.*atan(caf.LepMomY / caf.LepMomZ);
+  double evalTsmear = tsmear->Eval(caf.Elep_reco - mmu);
+  if( evalTsmear < 0. ) evalTsmear = 0.;
+  double reco_tx = true_tx + rando->Gaus(0., evalTsmear/sqrt(2.));
+  double reco_ty = true_ty + rando->Gaus(0., evalTsmear/sqrt(2.));
+  caf.theta_reco = 0.001*sqrt( reco_tx*reco_tx + reco_ty*reco_ty );
+
+  // assume perfect charge reconstruction
+  caf.reco_q = (caf.LepPDG > 0 ? -1 : 1);
+
+  // assume always muon for tracker-matched
+  caf.reco_numu = 1; caf.reco_nue = 0; caf.reco_nc = 0;
+  caf.muon_contained = 0; caf.muon_tracker = 1; caf.muon_ecal = 0; caf.muon_exit = 0;
+  caf.Ev_reco = caf.Elep_reco;
+}
+
+// Fill reco muon variables for muon contained in LAr
+void recoMuonLAr( CAF &caf, params &par )
+{
+  // range-based, smear kinetic energy
+  double ke = caf.LepE - mmu;
+  double reco_ke = rando->Gaus( ke, ke*par.LAr_muRes );
+  caf.Elep_reco = reco_ke + mmu;
+
+  double true_tx = 1000.*atan(caf.LepMomX / caf.LepMomZ);
+  double true_ty = 1000.*atan(caf.LepMomY / caf.LepMomZ);
+  double evalTsmear = tsmear->Eval(caf.Elep_reco - mmu);
+  if( evalTsmear < 0. ) evalTsmear = 0.;
+  double reco_tx = true_tx + rando->Gaus(0., evalTsmear/sqrt(2.));
+  double reco_ty = true_ty + rando->Gaus(0., evalTsmear/sqrt(2.));
+  caf.theta_reco = 0.001*sqrt( reco_tx*reco_tx + reco_ty*reco_ty );
+
+
+  // assume negative for FHC, require Michel for RHC
+  if( par.fhc ) caf.reco_q = -1;
+  else {
+    double michel = rando->Rndm();
+    if( caf.LepPDG == -13 && michel < par.michelEff ) caf.reco_q = 1; // correct mu+
+    else if( caf.LepPDG == 13 && michel < par.michelEff*0.25 ) caf.reco_q = 1; // incorrect mu-
+    else caf.reco_q = -1; // no reco Michel
+  }
+
+  caf.reco_numu = 1; caf.reco_nue = 0; caf.reco_nc = 0;
+  caf.muon_contained = 1; caf.muon_tracker = 0; caf.muon_ecal = 0; caf.muon_exit = 0;
+  caf.Ev_reco = caf.Elep_reco;
+}
+
+// Fill reco variables for muon reconstructed in magnetized tracker
+void recoMuonECAL( CAF &caf, params &par )
+{
+  // range-based KE
+  double ke = caf.LepE - mmu;
+  double reco_ke = rando->Gaus( ke, ke*par.ECAL_muRes );
+  caf.Elep_reco = reco_ke + mmu;
+
+  double true_tx = 1000.*atan(caf.LepMomX / caf.LepMomZ);
+  double true_ty = 1000.*atan(caf.LepMomY / caf.LepMomZ);
+  double evalTsmear = tsmear->Eval(caf.Elep_reco - mmu);
+  if( evalTsmear < 0. ) evalTsmear = 0.;
+  double reco_tx = true_tx + rando->Gaus(0., evalTsmear/sqrt(2.));
+  double reco_ty = true_ty + rando->Gaus(0., evalTsmear/sqrt(2.));
+  caf.theta_reco = 0.001*sqrt( reco_tx*reco_tx + reco_ty*reco_ty );
+
+  // assume perfect charge reconstruction -- these are fairly soft and should curve a lot in short distance
+  caf.reco_q = (caf.LepPDG > 0 ? -1 : 1);
+
+  // assume always muon for ecal-matched
+  caf.reco_numu = 1; caf.reco_nue = 0; caf.reco_nc = 0;
+  caf.muon_contained = 0; caf.muon_tracker = 0; caf.muon_ecal = 1; caf.muon_exit = 0;
+  caf.Ev_reco = caf.Elep_reco;
+}
+
+// Fill reco variables for true electron
+void recoElectron( CAF &caf, params &par )
+{
+  caf.reco_q = 0; // never know charge
+  caf.reco_numu = 0;
+  caf.muon_contained = 0; caf.muon_tracker = 1; caf.muon_ecal = 0; caf.muon_exit = 0;
+
+  // fake efficiency...threshold of 300 MeV, eff rising to 100% by 700 MeV
+  if( rando->Rndm() > (caf.LepE-0.3)*2.5 ) { // reco as NC
+    caf.Elep_reco = 0.;
+    caf.reco_nue = 0; caf.reco_nc = 1;
+    caf.Ev_reco = caf.LepE; // include electron energy in Ev anyway, since it won't show up in reco hadronic energy
+  } else { // reco as CC
+    caf.Elep_reco = rando->Gaus( caf.LepE, caf.LepE*(par.em_const + par.em_sqrtE/sqrt(caf.LepE)) );
+    caf.reco_nue = 1; caf.reco_nc = 0;
+    caf.Ev_reco = caf.Elep_reco;
+  }
+
+  double true_tx = 1000.*atan(caf.LepMomX / caf.LepMomZ);
+  double true_ty = 1000.*atan(caf.LepMomY / caf.LepMomZ);
+  double evalTsmear = 3. + tsmear->Eval(caf.Elep_reco - mmu);
+  if( evalTsmear < 0. ) evalTsmear = 0.;
+  double reco_tx = true_tx + rando->Gaus(0., evalTsmear/sqrt(2.));
+  double reco_ty = true_ty + rando->Gaus(0., evalTsmear/sqrt(2.));
+  caf.theta_reco = 0.001*sqrt( reco_tx*reco_tx + reco_ty*reco_ty );
+
+}
+
+void decayPi0( TLorentzVector pi0, TVector3 &gamma1, TVector3 &gamma2 )
+{
+  double e = pi0.E();
+  double mp = 134.9766; // pi0 mass
+
+  double beta = sqrt( 1. - (mp*mp)/(e*e) ); // velocity of pi0
+  double theta = 3.1416*rando->Rndm(); // theta of gamma1 w.r.t. pi0 direction
+  double phi = 2.*3.1416*rando->Rndm(); // phi of gamma1 w.r.t. pi0 direction
+
+  double p = mp/2.; // photon momentum in pi0 rest frame
+  TLorentzVector g1( 0., 0., p, p ); // pre-rotation photon 1
+  TLorentzVector g2( 0., 0., -p, p ); // pre-rotation photon 2 is opposite
+
+  // rotate to the random decay axis in pi0 rest frame. choice of rotation about x instead of y is arbitrary
+  g1.RotateX( theta );
+  g2.RotateX( theta );
+  g1.RotateZ( phi );
+  g2.RotateZ( phi );
+
+  // boost to lab frame with pi0 velocity. pi0 direction is z axis for this
+  g1.Boost( 0., 0., beta );
+  g2.Boost( 0., 0., beta );
+
+  // make gamma1 the more energetic one
+  if( g1.E() > g2.E() ) {
+    gamma1 = g1.Vect();
+    gamma2 = g2.Vect();
+  } else {
+    gamma1 = g2.Vect();
+    gamma2 = g1.Vect();
+  }
+
+  // rotate from frame where pi0 is z' direction into neutrino frame
+  TVector3 pi0dir = pi0.Vect().Unit(); // actually w.r.t. neutrino direction
+  gamma1.RotateUz( pi0dir );
+  gamma2.RotateUz( pi0dir );
+}
+
+// main loop function
+void loop( CAF &caf, params &par, TTree * tree, std::string ghepdir, std::string fhicl_filename )
+{
+  // read in edep-sim output file
+  int ifileNo, ievt, lepPdg, muonReco, nFS;
+  float lepKE, muGArLen, hadTot, hadCollar;
+  float hadP, hadN, hadPip, hadPim, hadPi0, hadOther;
+  float p3lep[3], vtx[3], muonExitPt[3], muonExitMom[3];
+  int fsPdg[100];
+  float fsPx[100], fsPy[100], fsPz[100], fsE[100], fsTrkLen[100], fsTrkLenPerp[100];
+  tree->SetBranchAddress( "ifileNo", &ifileNo );
+  tree->SetBranchAddress( "ievt", &ievt );
+  tree->SetBranchAddress( "lepPdg", &lepPdg );
+  tree->SetBranchAddress( "muonReco", &muonReco );
+  tree->SetBranchAddress( "lepKE", &lepKE );
+  tree->SetBranchAddress( "muGArLen", &muGArLen );
+  tree->SetBranchAddress( "hadTot", &hadTot );
+  tree->SetBranchAddress( "hadCollar", &hadCollar );
+  tree->SetBranchAddress( "hadP", &hadP );
+  tree->SetBranchAddress( "hadN", &hadN );
+  tree->SetBranchAddress( "hadPip", &hadPip );
+  tree->SetBranchAddress( "hadPim", &hadPim );
+  tree->SetBranchAddress( "hadPi0", &hadPi0 );
+  tree->SetBranchAddress( "hadOther", &hadOther );
+  tree->SetBranchAddress( "p3lep", p3lep );
+  tree->SetBranchAddress( "vtx", vtx );
+  tree->SetBranchAddress( "muonExitPt", muonExitPt );
+  tree->SetBranchAddress( "muonExitMom", muonExitMom );
+  tree->SetBranchAddress( "nFS", &nFS );
+  tree->SetBranchAddress( "fsPdg", fsPdg );
+  tree->SetBranchAddress( "fsPx", fsPx );
+  tree->SetBranchAddress( "fsPy", fsPy );
+  tree->SetBranchAddress( "fsPz", fsPz );
+
  
-    if len(okruns) == 0:
-        print "There are no runs in this TTree...skipping!"
-        return
+  tree->SetBranchAddress( "fsE", fsE );
+  tree->SetBranchAddress( "fsTrkLen", fsTrkLen );
+  tree->SetBranchAddress( "fsTrkLenPerp", fsTrkLenPerp );
+  // Get GHEP file for genie::EventRecord from other file
+  int current_file = -1;
+  TFile * ghep_file = NULL;
+  TTree * gtree = NULL;
 
-    print "Inside event loop with %d files and first run %d" % (nfiles, okruns[0])
+  std::string mode = ( par.fhc ? "neutrino" : "antineutrino" );
 
-    # updated geometry with less steel
-    offset = [ 0., 305., 5. ]
-    fvLo = [ -300., -100., 50. ]
-    fvHi = [ 300., 100., 450. ]
-    collarLo = [ -320., -120., 30. ]
-    collarHi = [ 320., 120., 470. ]
+  // DUNE reweight getter
+  nusyst::response_helper rh( fhicl_filename );
+  // Get list of variations, and make CAF branch for each one
+  std::vector<unsigned int> parIds = rh.GetParameters();
+  for( unsigned int i = 0; i < parIds.size(); ++i ) {
+    systtools::SystParamHeader head = rh.GetHeader(parIds[i]);
+    printf( "Adding reweight branch %u for %s with %lu shifts\n", parIds[i], head.prettyName.c_str(), head.paramVariations.size() );
+    bool is_wgt = head.isWeightSystematicVariation;
+    std::string wgt_var = ( is_wgt ? "wgt" : "var" );
+    caf.addRWbranch( parIds[i], head.prettyName, wgt_var, head.paramVariations );
+    caf.iswgt[parIds[i]] = is_wgt;
+  }
 
-    event = ROOT.TG4Event()
-    events.SetBranchAddress("Event",ROOT.AddressOf(event))
-    print "Set branch address"
-    t_gastpc_pi_pl_mult[0] = 0
-    t_gastpc_pi_min_mult[0] = 0
- 
-    t_nue_tot[0] = 0.0
-    #t_p_true[0] = 0.0
-    m_pi = 139.6
-    m_mu = 105.6
-    m_e = 0.510
-    m_p = 938.2
-    N = events.GetEntries()
-    evt_per_file = N/nfiles
-    if N % nfiles:
-        print "Files don't all have the same number of events!!!"
-        print "AAAAAAAAAAAAAAAAAAAAAAAAHHHHHHHHHHHHHHHHhhhh that's bad stop"
-        print "\n\n\n\n\n\n\n\n\n\n\n"
-        print "AAAAAAAAAAAAAAAAAAAAAAAAHHHHHHHHHHHHHHHHhhhh seriously stop it"
+  caf.pot = 0.;
 
-    print "Starting loop over %d entries" % N
-    for ient in range(N):
-        pi_pl_count = 0
-        pi_min_count = 0
-       
-        nue_tot = 0.0
+  // Main event loop
+  int N = tree->GetEntries();
+  if( par.n > 0 && par.n < N ) N = par.n + par.first;
+  for( int ii = par.first; ii < N; ++ii ) {
 
-	if ient % 100 == 0:
-            print "Event %d of %d..." % (ient,N)
-        events.GetEntry(ient)
-        for ivtx,vertex in enumerate(event.Primaries):
-	    node_all_prim = tgeo.FindNode(vertex.Position[0], vertex.Position[1],vertex.Position[2])
-            volname = node_all_prim.GetName()
+    tree->GetEntry(ii);
+    if( ii % 100 == 0 ) printf( "Event %d of %d...\n", ii, N );
+
+    caf.setToBS();
+
+    // set defaults
+    for( int j = 0; j < 100; ++j ) {
+      caf.nwgt[j] = 7;
+      caf.cvwgt[j] = ( caf.iswgt[j] ? 1. : 0. );
+      for( unsigned int k = 0; k < 100; ++k ) {
+        caf.wgt[j][k] = ( caf.iswgt[j] ? 1. : 0. );
+      }
+    }
+
+    // make sure ghep file matches the current one, otherwise update to the current ghep file
+    if( ifileNo != current_file ) {
+      // close the previous file
+      if( ghep_file ) ghep_file->Close();
+
+      if( par.grid ) ghep_file = new TFile( Form("genie.%d.root", ifileNo) );
+      else if( !par.IsGasTPC ) ghep_file = new TFile( Form("%s/%02d/LAr.%s.%d.ghep.root", ghepdir.c_str(), ifileNo/1000, mode.c_str(), ifileNo) );
+      else ghep_file = new TFile( Form("%s/GAr.%s.%d.ghep.root",  ghepdir.c_str(), mode.c_str(), ifileNo) );
+      //else ghep_file = new TFile( Form("%s/%02d/GAr.%s.%d.ghep.root", ghepdir.c_str(), ifileNo/1000, mode.c_str(), ifileNo) );
+      gtree = (TTree*) ghep_file->Get( "gtree" );
+      caf.pot += gtree->GetWeight();
+      printf( "New GHEP file with %g POT, total = %g\n", gtree->GetWeight(), caf.pot );
+
+      // can't find GHepRecord
+      if( gtree == NULL ) {
+        printf( "Can't find ghep event record for file %d!!!\n", ifileNo );
+        continue;
+      }
+
+      gtree->SetBranchAddress( "gmcrec", &caf.mcrec );
+      current_file = ifileNo;
+    }
+
+    caf.vtx_x = vtx[0];
+    caf.vtx_y = vtx[1];
+    caf.vtx_z = vtx[2]; 
+    caf.det_x = par.OA_xcoord;
+
+    // configuration variables in CAF file; we don't use mvaresult so just set it to zero
+    caf.run = par.run;
+    caf.subrun = par.subrun;
+    caf.event = ii;
+    caf.isFD = 0;
+    caf.isFHC = par.fhc;
+
+    // get GENIE event record
+    gtree->GetEntry( ievt );
+    genie::EventRecord * event = caf.mcrec->event;
+    genie::Interaction * in = event->Summary();
+
+    // Get truth stuff out of GENIE ghep record
+    caf.neutrinoPDG = in->InitState().ProbePdg();
+    caf.neutrinoPDGunosc = in->InitState().ProbePdg(); // fill this for similarity with FD, but no oscillations
+    caf.mode = in->ProcInfo().ScatteringTypeId();
+    caf.Ev = in->InitState().ProbeE(genie::kRfLab);
+    caf.LepPDG = in->FSPrimLeptonPdg();
+    caf.isCC = (abs(caf.LepPDG) == 13 || abs(caf.LepPDG) == 11);
+    
+    TLorentzVector lepP4;
+    TLorentzVector nuP4nuc = *(in->InitState().GetProbeP4(genie::kRfHitNucRest));
+    TLorentzVector nuP4 = *(in->InitState().GetProbeP4(genie::kRfLab));
+
+    caf.nP = 0;
+    caf.nN = 0;
+    caf.nipip = 0;
+    caf.nipim = 0;
+    caf.nipi0 = 0;
+    caf.nikp = 0;
+    caf.nikm = 0;
+    caf.nik0 = 0;
+    caf.niem = 0;
+    caf.niother = 0;
+    caf.nNucleus = 0;
+    caf.nUNKNOWN = 0; // there is an "other" category so this never gets used
+    caf.eP = 0.;
+    caf.eN = 0.;
+    caf.ePip = 0.;
+    caf.ePim = 0.;
+    caf.ePi0 = 0.;
+    caf.eOther = 0.;
+    caf.eRecoP = 0.;
+    caf.eRecoN = 0.;
+    caf.eRecoPip = 0.;
+    caf.eRecoPim = 0.;
+    caf.eRecoPi0 = 0.;
+    caf.eOther = 0.;
+    for( int i = 0; i < nFS; ++i ) {
+      double ke = 0.001*(fsE[i] - sqrt(fsE[i]*fsE[i] - fsPx[i]*fsPx[i] - fsPy[i]*fsPy[i] - fsPz[i]*fsPz[i]));
+      if( fsPdg[i] == caf.LepPDG ) {
+        lepP4.SetPxPyPzE( fsPx[i]*0.001, fsPy[i]*0.001, fsPz[i]*0.001, fsE[i]*0.001 );
+        caf.LepE = fsE[i]*0.001;
+      }
+      else if( fsPdg[i] == 2212 ) {caf.nP++; caf.eP += ke;}
+      else if( fsPdg[i] == 2112 ) {caf.nN++; caf.eN += ke;}
+      else if( fsPdg[i] ==  211 ) {caf.nipip++; caf.ePip += ke;}
+      else if( fsPdg[i] == -211 ) {caf.nipim++; caf.ePim += ke;}
+      else if( fsPdg[i] ==  111 ) {caf.nipi0++; caf.ePi0 += ke;}
+      else if( fsPdg[i] ==  321 ) {caf.nikp++; caf.eOther += ke;}
+      else if( fsPdg[i] == -321 ) {caf.nikm++; caf.eOther += ke;}
+      else if( fsPdg[i] == 311 || fsPdg[i] == -311 || fsPdg[i] == 130 || fsPdg[i] == 310 ) {caf.nik0++; caf.eOther += ke;}
+      else if( fsPdg[i] ==   22 ) {caf.niem++; caf.eOther += ke;}
+      else if( fsPdg[i] > 1000000000 ) caf.nNucleus++;
+      else {caf.niother++; caf.eOther += ke;}
+    }
+
+    // true 4-momentum transfer
+    TLorentzVector q = nuP4-lepP4;
+
+    // Q2, W, x, y frequently do not get filled in GENIE Kinematics object, so calculate manually
+    caf.Q2 = -q.Mag2();
+    caf.W = sqrt(0.939*0.939 + 2.*q.E()*0.939 + q.Mag2()); // "Wexp"
+    caf.X = -q.Mag2()/(2*0.939*q.E());
+    caf.Y = q.E()/caf.Ev;
+
+    caf.theta_reco = -1.; // default value
+
+    caf.NuMomX = nuP4.X();
+    caf.NuMomY = nuP4.Y();
+    caf.NuMomZ = nuP4.Z();
+    caf.LepMomX = lepP4.X();
+    caf.LepMomY = lepP4.Y();
+    caf.LepMomZ = lepP4.Z();
+    caf.LepE = lepP4.E();
+    caf.LepNuAngle = nuP4.Angle( lepP4.Vect() );
+
+    // Add DUNErw weights to the CAF
+
+    systtools::event_unit_response_w_cv_t resp = rh.GetEventVariationAndCVResponse(*event);
+    for( systtools::event_unit_response_w_cv_t::iterator it = resp.begin(); it != resp.end(); ++it ) {
+      caf.nwgt[(*it).pid] = (*it).responses.size();
+      caf.cvwgt[(*it).pid] = (*it).CV_response;
+      for( unsigned int i = 0; i < (*it).responses.size(); ++i ) {
+        caf.wgt[(*it).pid][i] = (*it).responses[i];
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    // Parameterized reconstruction
+    //--------------------------------------------------------------------------
+    if( !par.IsGasTPC ) {
+      // Loop over final-state particles
+      double longest_mip = 0.;
+      double longest_mip_KE = 0.;
+      int longest_mip_charge = 0;
+      caf.reco_lepton_pdg = 0;
+      int electrons = 0;
+      double electron_energy = 0.;
+      int reco_electron_pdg = 0;
+
+      for( int i = 0; i < nFS; ++i ) {
+        int pdg = fsPdg[i];
+        double p = sqrt(fsPx[i]*fsPx[i] + fsPy[i]*fsPy[i] + fsPz[i]*fsPz[i]);
+        double KE = fsE[i] - sqrt(fsE[i]*fsE[i] - p*p);
+
+ 	if( (abs(pdg) == 13 || abs(pdg) == 211) && fsTrkLen[i] > longest_mip ) {
+          longest_mip = fsTrkLen[i];
+          longest_mip_KE = KE;
+          caf.reco_lepton_pdg = pdg;
+          if( pdg == 13 || pdg == -211 ) longest_mip_charge = -1;
+          else longest_mip_charge = 1;
+        }
+
+        // pi0 as nu_e
+        if( pdg == 111 ) {
+          TVector3 g1, g2;
+          TLorentzVector pi0( fsPx[i], fsPy[i], fsPz[i], fsE[i] );
+          decayPi0( pi0, g1, g2 );
+          double g1conv = rando->Exp( 14. ); // conversion distance
+          bool compton = (rando->Rndm() < 0.15); // dE/dX misID probability for photon
+          // if energetic gamma converts in first wire, and other gamma is either too soft or too colinear
+          if( g1conv < 2.0 && compton && (g2.Mag() < 50. || g1.Angle(g2) < 0.01) ) electrons++;
+          electron_energy = g1.Mag();
+          reco_electron_pdg = 111;
+        }        // I do not know where this is coming from 
+		//par.trk_n_points = ceil(len);
+      }
+
+      // True CC reconstruction
+      if( abs(lepPdg) == 11 ) { // true nu_e
+        recoElectron( caf, par );
+        electrons++;
+        reco_electron_pdg = lepPdg;
+      } else if( abs(lepPdg) == 13 ) { // true nu_mu
+        if     ( muonReco == 2 ) recoMuonTracker( caf, par ); // gas TPC match
+        else if( muonReco == 1 ) recoMuonLAr( caf, par ); // LAr-contained muon, this might get updated to NC...
+        else if( muonReco == 3 ) recoMuonECAL( caf, par ); // ECAL-stopper
+        else { // exiting but poorly-reconstructed muon
+          caf.Elep_reco = longest_mip * 0.0022;
+          caf.reco_q = 0;
+          caf.reco_numu = 1; caf.reco_nue = 0; caf.reco_nc = 0;
+          caf.muon_contained = 0; caf.muon_tracker = 0; caf.muon_ecal = 0; caf.muon_exit = 1;
+
+          double true_tx = 1000.*atan(caf.LepMomX / caf.LepMomZ);
+          double true_ty = 1000.*atan(caf.LepMomY / caf.LepMomZ);
+          double evalTsmear = tsmear->Eval(caf.Elep_reco - mmu);
+          if( evalTsmear < 0. ) evalTsmear = 0.;
+          double reco_tx = true_tx + rando->Gaus(0., evalTsmear/sqrt(2.));
+          double reco_ty = true_ty + rando->Gaus(0., evalTsmear/sqrt(2.));
+          caf.theta_reco = 0.001*sqrt( reco_tx*reco_tx + reco_ty*reco_ty );
+        }
+      } else { // NC -- set PID variables, will get updated later if fake CC
+        caf.Elep_reco = 0.;
+        caf.reco_q = 0;
+        caf.reco_numu = 0; caf.reco_nue = 0; caf.reco_nc = 1;
+        caf.muon_contained = 0; caf.muon_tracker = 0; caf.muon_ecal = 0; caf.muon_exit = 0;
+      }
+
+      // CC/NC confusion
+      if( electrons == 1 && muonReco <= 1 ) { // NC or numuCC reco as nueCC
+        caf.Elep_reco = electron_energy*0.001;
+        caf.reco_q = 0;
+        caf.reco_numu = 0; caf.reco_nue = 1; caf.reco_nc = 0;
+        caf.muon_contained = 0; caf.muon_tracker = 0; caf.muon_ecal = 0; caf.muon_exit = 0;
+        caf.reco_lepton_pdg = reco_electron_pdg;
+      } else if( muonReco <= 1 && !(abs(lepPdg) == 11 && caf.Elep_reco > 0.) && (longest_mip < par.CC_trk_length || longest_mip_KE/longest_mip > 3.) ) { 
+        // reco as NC
+        caf.Elep_reco = 0.;
+        caf.reco_q = 0;
+        caf.reco_numu = 0; caf.reco_nue = 0; caf.reco_nc = 1;
+        caf.muon_contained = 0; caf.muon_tracker = 0; caf.muon_ecal = 0; caf.muon_exit = 0;
+        caf.reco_lepton_pdg = 0;
+      } else if( (abs(lepPdg) == 12 || abs(lepPdg) == 14) && longest_mip > par.CC_trk_length && longest_mip_KE/longest_mip < 3. ) { // true NC reco as CC numu
+        caf.Elep_reco = longest_mip_KE*0.001 + mmu;
+        if( par.fhc ) caf.reco_q = -1;
+        else {
+          double michel = rando->Rndm();
+          if( longest_mip_charge == 1 && michel < par.michelEff ) caf.reco_q = 1; // correct mu+
+          else if( michel < par.michelEff*0.25 ) caf.reco_q = 1; // incorrect mu-
+          else caf.reco_q = -1; // no reco Michel
+        }
+        caf.reco_numu = 1; caf.reco_nue = 0; caf.reco_nc = 0;
+        caf.muon_contained = 1; caf.muon_tracker = 0; caf.muon_ecal = 0; caf.muon_exit = 0;
+      }
+
+      // Hadronic energy calorimetrically
+      caf.Ev_reco = caf.Elep_reco + hadTot*0.001;
+      caf.Ehad_veto = hadCollar;
+      caf.eRecoP = hadP*0.001;
+      caf.eRecoN = hadN*0.001;
+      caf.eRecoPip = hadPip*0.001;
+      caf.eRecoPim = hadPim*0.001;
+      caf.eRecoPi0 = hadPi0*0.001;
+      caf.eRecoOther = hadOther*0.001;
+
+      caf.pileup_energy = 0.;
+      if( rando->Rndm() < par.pileup_frac ) caf.pileup_energy = rando->Rndm() * par.pileup_max;
+      caf.Ev_reco += caf.pileup_energy;
+    } else {
+      // gas TPC: FS particle loop look for long enough tracks and smear momenta
+      caf.nFSP = nFS;
+      for( int i = 0; i < nFS; ++i ) {
+        double ptrue = 0.001*sqrt(fsPx[i]*fsPx[i] + fsPy[i]*fsPy[i] + fsPz[i]*fsPz[i]);
+        double mass = 0.001*sqrt(fsE[i]*fsE[i] - fsPx[i]*fsPx[i] - fsPy[i]*fsPy[i] - fsPz[i]*fsPz[i]);
+        //add variable fsTracklengthper into input and output
+	int n_trk_pnts = ceil(fsTrkLenPerp[i]);
+        double sig_1 = par.sig_x * par.sig_x * ptrue * ptrue * sqrt(720 / (n_trk_pnts+4)) / (0.3 * 0.3 * par.bfield * par.bfield * fsTrkLenPerp[i] * fsTrkLenPerp[i] * fsTrkLenPerp[i] * fsTrkLenPerp[i]);
+        double sig_2 = 0.05 * 0.05 * sqrt(1.43 / fsTrkLenPerp[i] * par.x_0) / (par.bfield * par.bfield);
+        double sig = sqrt(sig_1 + sig_2);
+	caf.pdg[i] = fsPdg[i];
+        caf.trkLen[i] = fsTrkLen[i];
+        caf.trkLenPerp[i] = fsTrkLenPerp[i];
+	// track length cut 6cm according to T Junk
+        if( fsTrkLen[i] > 0. ) { // reconstruct
+          if( fsPdg[i] == caf.LepPDG ) {
+            recoMuonTracker( caf, par ); // should be first
+            caf.partEvReco[i] = caf.Ev_reco;
+            if( fsTrkLen[i] < 100. ) {
+              caf.reco_numu = 0;
+              caf.reco_nc = 1;
+            }
+          } else {
+            //double preco = rando->Gaus( ptrue, ptrue*par.trk_muRes );
+            // below is the new gas TPC reconstion using the Gluckstern formula
+	    
+	    double preco = rando->Gaus( ptrue, ptrue*sig );
+	    double ereco = sqrt( preco*preco + mass*mass ) - mass;
+            if( abs(fsPdg[i]) == 211 ) ereco += mass;
+            else if( fsPdg[i] == 2212 && preco > 1.5 ) ereco += 0.1395; // mistake pion mass for high-energy proton
+            caf.partEvReco[i] = ereco;
+            if( fsTrkLen[i] > par.gastpc_len ) {
+              caf.Ev_reco += ereco;
+              if( fsPdg[i] == 211 ) caf.gastpc_pi_pl_mult++;
+              else if( fsPdg[i] == -211 ) caf.gastpc_pi_min_mult++;
+            }
+          }
+        } else if( fsPdg[i] == 111 || fsPdg[i] == 22 ) {
+          double ereco = 0.001 * rando->Gaus( fsE[i], 0.1*fsE[i] );
+          caf.partEvReco[i] = ereco;
+          caf.Ev_reco += ereco;
+        }
+      }
+    }
+
+    //printf( "Ev reco %f pion mult %d %d Elep reco %f reco numu %d reco q %d Ehad_veto %f muon_tracker %d\n", caf.Ev_reco, caf.gastpc_pi_pl_mult, caf.gastpc_pi_min_mult, caf.Elep_reco, caf.reco_numu, caf.reco_q, caf.Ehad_veto, caf.muon_tracker );
+
+    caf.fill();
+  }
+
+  // set POT
+  caf.meta_run = par.run;
+  caf.meta_subrun = par.subrun;
+
+}
+
+int main( int argc, char const *argv[] ) 
+{
+
+  if( (argc == 2) && ((std::string("--help") == argv[1]) || (std::string("-h") == argv[1])) ) {
+    std::cout << "Help yourself by looking at the source code to see what the options are." << std::endl;
+    return 0;
+  }
+
+  // get command line options
+  std::string ghepdir;
+  std::string outfile;
+  std::string edepfile;
+  std::string fhicl_filename;
+
+  // Make parameter object and set defaults
+  params par;
+  par.IsGasTPC = false;
+  par.OA_xcoord = 0.; // on-axis by default
+  par.fhc = true;
+  par.grid = false;
+  par.seed = 7; // a very random number
+  par.run = 1; // CAFAna doesn't like run number 0
+  par.subrun = 0;
+  par.n = -1;
+  par.nfiles = 1;
+  par.first = 0;
+  par.trk_muRes = 0.02; // fractional muon energy resolution of HP GAr TPC
+  par.LAr_muRes = 0.05; // fractional muon energy resolution of muons contained in LAr
+  par.ECAL_muRes = 0.1; // fractional muon energy resolution of muons ending in ECAL
+  par.em_const = 0.03; // EM energy resolution constant term: A + B/sqrt(E) (GeV)
+  par.em_sqrtE = 0.1; // EM energy resolution 1/sqrt(E) term: A + B/sqrt(E) (GeV)
+  par.michelEff = 0.75; // Michel finder efficiency
+  par.CC_trk_length = 100.; // minimum track length for CC in cm
+  par.pileup_frac = 0.1; // fraction of events with non-zero pile-up
+  par.pileup_max = 0.5; // GeV
+  par.gastpc_len = 6.;
+  par.sig_x = 0.1; // in cm 
+  par.bfield = 0.4; //in T  
+  par.x_0 = 1300; //in cm 
   
-            fileidx = ient/evt_per_file
-            t_ifileNo[0] = okruns[fileidx]
-            t_ievt[0] = ient%evt_per_file;
-            t_vtx[0]=0.0; t_vtx[1]=0.0; t_vtx[2]=0.0;
-    		  
-	    t_vtx_no_off[0]=0.0; t_vtx_no_off[1]=0.0; t_vtx_no_off[2]=0.0; 
-	    t_p3lep[0]=0.0; t_p3lep[1]=0.0; t_p3lep[2]=0.0;
-            t_lepDeath[0]=0.0; t_lepDeath[1]=0.0; t_lepDeath[2]=0.0;
-            t_lepPdg[0] = 0
-            t_lepKE[0] = 0.
-            t_muonExitPt[0] = 0.0; t_muonExitPt[1] = 0.0; t_muonExitPt[2] = 0.0; 
-            t_muonExitMom[0] = 0.0; t_muonExitMom[1] = 0.0; t_muonExitMom[2] = 0.0; 
-            t_muonReco[0] = -1;
-	    t_reco_numu[0] = 0;
-            t_muGArLen[0]=0.0;
-            t_hadTot[0] = 0.
-            t_hadCollar[0] = 0.
-            t_nFS[0] = 0
-            t_lepstart[0]=0.0; t_lepstart[1]=0.0; t_lepstart[2]=0.0;
+  int i = 0;
+  while( i < argc ) {
+    if( argv[i] == std::string("--edepfile") ) {
+      edepfile = argv[i+1];
+      i += 2;
+    } else if( argv[i] == std::string("--ghepdir") ) {
+      ghepdir = argv[i+1];
+      i += 2;
+    } else if( argv[i] == std::string("--outfile") ) {
+      outfile = argv[i+1];
+      i += 2;
+    } else if( argv[i] == std::string("--fhicl") ) {
+      fhicl_filename = argv[i+1];
+      i += 2;
+    } else if( argv[i] == std::string("--seed") ) {
+      par.seed = atoi(argv[i+1]);
+      par.run = par.seed;
+      i += 2;
+    } else if( argv[i] == std::string("--nevents") ) {
+      par.n = atoi(argv[i+1]);
+      i += 2;
+    } else if( argv[i] == std::string("--nfiles") ) {
+      par.nfiles = atoi(argv[i+1]);
+      i += 2;
+    } else if( argv[i] == std::string("--first") ) {
+      par.first = atoi(argv[i+1]);
+      i += 2;
+    } else if( argv[i] == std::string("--oa") ) {
+      par.OA_xcoord = atof(argv[i+1]);
+      i += 2;
+    } else if( argv[i] == std::string("--grid") ) {
+      par.grid = true;
+      i += 1;
+    } else if( argv[i] == std::string("--rhc") ) {
+      par.fhc = false;
+      i += 1;
+    } else if( argv[i] == std::string("--gastpc") ) {
+      par.IsGasTPC = true;
+      i += 1;
+    } else i += 1; // look for next thing
+  }
 
+  printf( "Making CAF from edep-sim tree dump: %s\n", edepfile.c_str() );
+  printf( "Searching for GENIE ghep files here: %s\n", ghepdir.c_str() );
+  if( par.fhc ) printf( "Running neutrino mode (FHC)\n" );
+  else printf( "Running antineutrino mode (RHC)\n" );
+  if( par.grid ) printf( "Running grid mode\n" );
+  else printf( "Running test mode\n" );
+  printf( "Output CAF file: %s\n", outfile.c_str() );
+  if( par.IsGasTPC ) printf( "Running gas TPC\n" );
 
-            reaction=vertex.Reaction        
+  rando = new TRandom3( par.seed );
+  CAF caf( outfile, par.IsGasTPC );
 
-            # set the vertex location for output
-            for i in range(3): 
-                t_vtx[i] = vertex.Position[i] / 10. - offset[i] # cm
-	   
-	    for i in range(3):
-		t_vtx_no_off[i] = vertex.Position[i] / 10.
-
-
-
-            #for i in range(3):
-            #    if t_vtx[i] < fvLo[i] or t_vtx[i] > fvHi[i]:
-            #        fvCut = True
-            #vtxv = ROOT.TVector3( t_vtx[0], t_vtx[1], t_vtx[2] )
-            #if fvCut:
-            #    continue
-
-            ileptraj = -1
-            nfsp = 0
-
-            fsParticleIdx = {}
-            for ipart,particle in enumerate(vertex.Particles):
-                e = particle.Momentum[3]
-                p = (particle.Momentum[0]**2 + particle.Momentum[1]**2 + particle.Momentum[2]**2)**0.5
-		 
-		p_recon = ROOT.gRandom.Gaus(p, p*(0.01))
-		p_recon_pi0 = ROOT.gRandom.Gaus(p, p*(0.10))
-		if particle.PDGCode != 111: 
-			t_p_recon_gen[0] = p_recon
-		if particle.PDGCode == 111:
-			t_p_recon_gen[0] = p_recon_pi0
-		m = (e**2 - p**2)**0.5
-		t_m_recon_gen[0] = m
-		t_p_true_gen[0] = p
-		t_pdg_gen[0] = particle.PDGCode
-	
-
-
-		t_fsPdg[nfsp] = particle.PDGCode
-                t_fsPx[nfsp] = particle.Momentum[0]
-                t_fsPy[nfsp] = particle.Momentum[1]
-                t_fsPz[nfsp] = particle.Momentum[2]
-                t_fsE[nfsp] = e
-
-                fsParticleIdx[particle.TrackId] = nfsp
-                nfsp += 1
-                if abs(particle.PDGCode) in [11,12,13,14]:
-                    ileptraj = particle.TrackId
-                    t_lepPdg[0] = particle.PDGCode
-                    # set the muon momentum for output
-                    for i in range(3): t_p3lep[i] = particle.Momentum[i]
-                    t_lepKE[0] = e - m
-		if abs(particle.PDGCode) == 211:
-                                ke_pi = e - m_pi
-              		                  
-                                if ke_pi > 5. and p_recon < 1000.:
-                                        pi_pl_count = pi_pl_count+1
-               
-                if particle.PDGCode == -211:
-                                ke_pi = e - m_pi
-                        
-                                if ke_pi > 5. and p_recon < 1000.:
-                                        pi_min_count = pi_min_count+1
-             
-            	if particle.PDGCode == 13:  
-                         
-                                ke_mu = (p_recon**2 + m_mu**2)**(0.5) - m_mu
-                                if ke_mu > 5.:
-                                        nue_mu_pl = (p_recon*p_recon + m_mu*m_mu)**0.5
-                                        nue_tot += nue_mu_pl
-					p_recon_mu = p_recon
-					p_mu = p
-					pdg_mu = particle.PDGCode		
-		if particle.PDGCode == 211:
-
-
-                                ke_pi = (p_recon**2 + m_pi**2)**(0.5) - m_pi
-                                if ke_pi > 5.:
-                                        nue_pi_pl = (p_recon*p_recon + m_pi*m_pi)**0.5
-                                        nue_tot += nue_pi_pl
-					p_recon_pi = p_recon
-                                        p_pi = p
-					pdg_pi = particle.PDGCode
-                if particle.PDGCode == 2212:
-				ke_p = (p_recon**2 + m_p**2)**(0.5) - m_p
-				if ke_p > 5.:
-                               
-					nue_p = ke_p
-					nue_tot += nue_p
-					p_recon_pro = p_recon
-                                        p_pro = p
-					pdg_pro = particle.PDGCode
-
-		if particle.PDGCode == 111:
-				p_recon_pi0 = ROOT.gRandom.Gaus(p, p*(0.1))
-		
-				nue_pi0 = (p_recon_pi0*p_recon_pi0)**0.5  
-				nue_tot += nue_pi0
-				p_recon_pi0 = p_recon_pi0
-				p_pi0 = p 
-				pdg_pi0 = particle.PDGCode			
-		if particle.PDGCode == 2112:
-				p_recon_n = p_recon
-				p_n = p
-				pdg_n = particle.PDGCode 
-		if particle.PDGCode == 321: 
- 				p_recon_k = p_recon
-                                p_k = p
-                                pdg_k = particle.PDGCode
-				
-		if particle.PDGCode == 11:
-                               
-                                p_recon_e = p_recon
-                                p_e = p
-                                pdg_e = particle.PDGCode
-
-            t_nue_tot[0] = nue_tot
-            t_gastpc_pi_pl_mult[0] = pi_pl_count
-            t_gastpc_pi_min_mult[0] = pi_min_count
-	  	 
-	    assert ileptraj != -1, "There isn't a lepton??"
-            t_nFS[0] = nfsp
-	   
-
-            # If there is a muon, determine how to reconstruct its momentum and charge
-            muexit = 0
-            exitKE = 0.
-            exitP = None
-            reco_numu = 0
-	    endVolIdx = -1 # where does the muon die
-            if abs(t_lepPdg[0]) == 13:
-                leptraj = event.Trajectories[ileptraj]
-                for p in leptraj.Points:
-                    pt = p.Position
-                    
-		    node = tgeo.FindNode( pt.X(), pt.Y(), pt.Z() )
-                    volName = node.GetName()
-		    active = False
-                    for v in gar_active_vols:
-                        if v in volName:
-                            active = True
-                            break
-                    if active:
-                        t_muonExitPt[0] = pt.X() / 10. - offset[0]
-                        t_muonExitPt[1] = pt.Y() / 10. - offset[1]
-                        t_muonExitPt[2] = pt.Z() / 10. - offset[2]
-                        continue
-	
-                    t_muonExitPt[0] = pt.X() / 10. - offset[0]
-                    t_muonExitPt[1] = pt.Y() / 10. - offset[1]
-                    t_muonExitPt[2] = pt.Z() / 10. - offset[2]
-                    t_muonExitMom[0] = p.Momentum.x()
-                    t_muonExitMom[1] = p.Momentum.y()
-                    t_muonExitMom[2] = p.Momentum.z()
-                    exitP = p.Momentum
-                    exitKE = (exitP.x()**2 + exitP.y()**2 + exitP.z()**2 + 105.3**2)**0.5 - 105.3
-                    break
-		   
-                  
-               
-		startpt = leptraj.Points[0].Position
-                endpt = leptraj.Points[-1].Position
-		node = tgeo.FindNode( endpt.X(), endpt.Y(), endpt.Z() )
-
-                t_lepDeath[0] = endpt.X()/10. - offset[0]
-                t_lepDeath[1] = endpt.Y()/10. - offset[1]
-                t_lepDeath[2] = endpt.Z()/10. - offset[2]
-		
-		t_lepstart[0] = startpt.X()/10. - offset[0]
-                t_lepstart[1] = startpt.Y()/10. - offset[1]
-                t_lepstart[2] = startpt.Z()/10. - offset[2]
-
-
-
-
-                endVolName = node.GetName()
-
-
-                if "volWorld" in endVolName or "volDetEnclosure" in endVolName: endVolIdx = 0 # outside detector components
-                if "TPC1_PV_0" == volName or "TPC2_PV_0" == volName: 
-			endVolIdx = 1 # active GAr
-			reco_numu = 1
-
-                if "Endcap" in endVolName or "Yoke" in endVolName: endVolIdx = 2 # Passive component of GAr
-                if "Tile" in endVolName: endVolIdx = 3
-
-                hits = []
-                
-		for key in event.SegmentDetectors:
-               
-	
-		     if key.first in ["TPC1", "TPC2"]:
-                        hits += key.second
-
-                tot_length = 0.0
-                for hit in hits:
-                    if hit.PrimaryId == ileptraj: # hit is due to the muon
-
-                        hStart = ROOT.TVector3( hit.Start[0]/10.-offset[0], hit.Start[1]/10.-offset[1], hit.Start[2]/10.-offset[2] )
-                        hStop = ROOT.TVector3( hit.Stop[0]/10.-offset[0], hit.Stop[1]/10.-offset[1], hit.Stop[2]/10.-offset[2] )
-                        tot_length += (hStop-hStart).Mag()
-
-                t_muGArLen[0] = tot_length
-
-                # muon reconstruction method
-                # 1 = contained
-                if reco_numu == 1: 
-			t_reco_numu[0] = 1
-		if endVolIdx == 1:
-                    t_muonReco[0] = 1
-                    if muexit != 0: print "Muon exit %d but end vol is active" % muexit
-                # 2 = Endcaps of the PV
-                elif endVolIdx == 2: 
-                    t_muonReco[0] = 2
-                # 4 = ECAL stopper
-                elif endVolIdx == 3: 
-                    t_muonReco[0] = 3
-
-
-	    hits = []
-            for key in event.SegmentDetectors:
-
-		if key.first in  ["TPC1", "TPC2"]:
-
-			hits += key.second
-            collar_energy = 0.
-            total_energy = 0.
-            track_length = [0. for i in range(nfsp)]
-            for hit in hits:
-                hStart = ROOT.TVector3( hit.Start[0]/10.-offset[0], hit.Start[1]/10.-offset[1], hit.Start[2]/10.-offset[2] )
-                hStop = ROOT.TVector3( hit.Stop[0]/10.-offset[0], hit.Stop[1]/10.-offset[1], hit.Stop[2]/10.-offset[2] )
-                if event.Trajectories[hit.PrimaryId].ParentId == -1:
-                    track_length[fsParticleIdx[hit.PrimaryId]] += (hStop-hStart).Mag()
-		# below is to be ignored for gas TPC
-                if hit.PrimaryId != ileptraj:
-                    hStart = ROOT.TVector3( hit.Start[0]/10.-offset[0], hit.Start[1]/10.-offset[1], hit.Start[2]/10.-offset[2] )
-                    total_energy += hit.EnergyDeposit
-                    # check if hit is in collar region
-                    if hStart.x() < collarLo[0] or hStart.x() > collarHi[0] or hStart.y() < collarLo[1] or hStart.y() > collarHi[1] or hStart.z() < collarLo[2] or hStart.z() > collarHi[2]:
-                        collar_energy += hit.EnergyDeposit
-
-            t_hadTot[0] = total_energy
-            t_hadCollar[0] = collar_energy
-            for i in range(nfsp):
-                t_fsTrkLen[i] = track_length[i]
-    
-            tout.Fill()
-
-
+  // LAr driven smearing, maybe we want to change for gas?
+  tsmear = new TF1( "tsmear", "0.162 + 3.407*pow(x,-1.) + 3.129*pow(x,-0.5)", 0., 999.9 );
  
+  TFile * tf = new TFile( edepfile.c_str() );
+  TTree * tree = (TTree*) tf->Get( "tree" );
+
+  loop( caf, par, tree, ghepdir, fhicl_filename );
+
+  caf.version = 4;
+  printf( "Run %d POT %g\n", caf.meta_run, caf.pot );
+  caf.fillPOT();
+  caf.write();
+
+  caf.cafFile->Close();
+
+  printf( "-30-\n" );
 
 
-
-
-
-
-
-if __name__ == "__main__":
-
-    ROOT.gROOT.SetBatch(1)
-
-    parser = OptionParser()
-    parser.add_option('--outfile', help='Output file name', default="out.root")
-    parser.add_option('--topdir', help='Input file top directory', default="")
-    parser.add_option('--first_run', type=int, help='First run number', default=0)
-    parser.add_option('--last_run', type=int, help='Last run number', default=0)
-    parser.add_option('--rhc', action='store_true', help='Reverse horn current', default=False)
-    parser.add_option('--grid', action='store_true', help='grid mode', default=False)
-
-    (args, dummy) = parser.parse_args()
-
-    # make an output ntuple
-    fout = ROOT.TFile( args.outfile, "RECREATE" )
-    tout = ROOT.TTree( "tree","tree" )
-    
-   
-  
- 
-
-
-    t_m_recon_gen = array('f',[0.0])
-    tout.Branch('m_recon_gen',t_m_recon_gen,'m_recon_gen/F')
-    t_pdg_gen = array('i',[0])
-    tout.Branch('pdg_gen',t_pdg_gen,'pdg_gen/I') 
-    t_p_true_gen = array('f',[0.0])
-    tout.Branch('p_true_gen',t_p_true_gen,'p_true_gen/F') 
-    t_p_recon_gen = array('f',[0.0])
-    tout.Branch('p_recon_gen',t_p_recon_gen,'p_recon_gen/F')
-
-
-    t_ifileNo = array('i',[0])
-    tout.Branch('ifileNo',t_ifileNo,'ifileNo/I')
-    t_ievt = array('i',[0])
-    tout.Branch('ievt',t_ievt,'ievt/I')
-    t_p3lep = array('f',3*[0.0])
-    tout.Branch('p3lep',t_p3lep,'p3lep[3]/F')
-    t_vtx = array('f',3*[0.0])
-    tout.Branch('vtx',t_vtx,'vtx[3]/F')
-    t_vtx_no_off = array('f',3*[0.0])
-    tout.Branch('vtx_no_off',t_vtx_no_off,'vtx_no_off[3]/F')
-    t_lepDeath = array('f',3*[0.0])
-    tout.Branch('lepDeath',t_lepDeath,'lepDeath[3]/F')
-    t_lepPdg = array('i',[0])
-    tout.Branch('lepPdg',t_lepPdg,'lepPdg/I')
-    t_lepKE = array('f',[0])
-    tout.Branch('lepKE',t_lepKE,'lepKE/F')
-    t_muonExitPt = array('f',3*[0.0])
-    tout.Branch('muonExitPt',t_muonExitPt,'muonExitPt[3]/F')
-    t_muonExitMom = array('f',3*[0.0])
-    tout.Branch('muonExitMom',t_muonExitMom,'muonExitMom[3]/F')
-    t_muonReco = array('i',[0])
-    tout.Branch('muonReco',t_muonReco,'muonReco/I')
-    t_muGArLen = array('f',[0])
-    tout.Branch('muGArLen',t_muGArLen,'muGArLen/F')
-    t_hadTot = array('f', [0.] )
-    tout.Branch('hadTot', t_hadTot, 'hadTot/F' )
-    t_hadCollar = array('f', [0.] )
-    tout.Branch('hadCollar', t_hadCollar, 'hadCollar/F' )
-    t_nFS = array('i',[0])
-    tout.Branch('nFS',t_nFS,'nFS/I')
-    t_fsPdg = array('i',100*[0])
-    tout.Branch('fsPdg',t_fsPdg,'fsPdg[nFS]/I')
-    t_fsPx = array('f',100*[0.])
-    tout.Branch('fsPx',t_fsPx,'fsPx[nFS]/F')
-    t_fsPy = array('f',100*[0.])
-    tout.Branch('fsPy',t_fsPy,'fsPy[nFS]/F')
-    t_fsPz = array('f',100*[0.])
-    tout.Branch('fsPz',t_fsPz,'fsPz[nFS]/F')
-    t_fsE = array('f',100*[0.])
-    tout.Branch('fsE',t_fsE,'fsE[nFS]/F')
-    t_fsTrkLen = array('f',100*[0.])
-    tout.Branch('fsTrkLen',t_fsTrkLen,'fsTrkLen[nFS]/F')
-    t_reco_numu = array('i',[0])
-    tout.Branch('reco_numu',t_reco_numu,'reco_numu/I')
-    t_gastpc_pi_pl_mult = array('i',[0])
-    tout.Branch('gastpc_pi_pl_mult',t_gastpc_pi_pl_mult,'gastpc_pi_pl_mult/I')
-    t_gastpc_pi_min_mult= array('i',[0])
-    tout.Branch('gastpc_pi_min_mult',t_gastpc_pi_min_mult,'gastpc_pi_min_mult/I')
-    t_lepstart = array('f',3*[0.0])
-    tout.Branch('lepstart',t_lepstart,'lepstart[3]/F')
-    t_nue_mu_pl = array('f',[0.])
-    tout.Branch('nue_mu_pl',t_nue_mu_pl,'nue_mu_pl')
-
-    t_nue_mu_min = array('f',[0.])
-    tout.Branch('nue_mu_min',t_nue_mu_min,'nue_mu_min')
-
-    t_nue_e_pl = array('f',[0.])
-    tout.Branch('nue_e_pl',t_nue_e_pl,'nue_e_pl')
-
-    t_nue_e_min = array('f',[0.])
-    tout.Branch('nue_e_min',t_nue_e_min,'nue_e_min')
-
-    t_nue_pi_pl = array('f',[0.])
-    tout.Branch('nue_pi_pl',t_nue_pi_pl,'nue_pi_pl')
-	
-    t_nue_pi_min = array('f',[0.])
-    tout.Branch('nue_pi_min',t_nue_pi_min,'nue_pi_min')
-
-    t_nue_p = array('f',[0.])
-    tout.Branch('nue_p',t_nue_p,'nue_p')
-
-    t_nue_p0 = array('f',[0.])
-    tout.Branch('nue_p0',t_nue_p0,'nue_p0')
-    
-    t_nue_tot = array('f',[0.])
-    tout.Branch('nue_tot',t_nue_tot,'nue_tot')
-    loaded = False
-    #if os.path.exists("EDepSimEvents/EDepSimEvents.so"):
-    #    print "Found EDepSimEvents.so"
-    #    ROOT.gSystem.Load("EDepSimEvents/EDepSimEvents.so")
-    #    loaded = True
-
-    tgeo = None
-
-    events = ROOT.TChain( "EDepSimEvents", "main event tree" )
-
-    neutrino = "neutrino"
-    if args.rhc:
-        neutrino = "antineutrino"
-
-    print "Building TChains for runs %d-%d..." % (args.first_run, args.last_run)
-    nfiles = 0
-    okruns = []
-    for run in range( args.first_run, args.last_run+1 ):
-        if args.grid:
-            fname = "%s/edep.%d.root" % (args.topdir,run)
-        else:
-            fname = "%s/%s/GAr.%s.%d.edepsim.root" % (args.topdir, neutrino, neutrino, run)
-        print fname
-
-        # see if it is an OK file
-        if not os.access( fname, os.R_OK ):
-            print "Can't access file: %s" % fname
-            continue
-        tf = ROOT.TFile( fname )
-        if tf.TestBit(ROOT.TFile.kRecovered): # problem with file
-            print "File is crap: %s" % fname
-            continue
-        nfiles += 1
-        okruns.append( run )
-
-        if not loaded:
-            loaded = True
-            tf.MakeProject("EDepSimEvents","*","RECREATE++")
-
-        # add it to the tchain
-        events.Add( fname )
-
-        if tgeo is None: # first OK file, get geometry
-            tgeo = tf.Get("EDepSimGeometry")
-        tf.Close() # done with this one
-
-    print "OK runs: ", sorted(okruns)
-    #print "got %d events in %d files = %1.1f events per file" % (events.GetEntries(), nfiles, 1.0*events.GetEntries()/nfiles)
-    loop( events, tgeo, tout, nfiles, sorted(okruns) )
-
-    fout.cd()
-    tout.Write()
-
-
-
-
+}
