@@ -94,7 +94,7 @@ CAF::CAF( std::string filename, bool isGas )
     cafMVA->Branch( "trkLen", trkLen, "trkLen[nFSP]/D" );    
     cafMVA->Branch( "trkLenPerp", trkLenPerp, "trkLenPerp[nFSP]/D" );
     cafMVA->Branch( "partEvReco", partEvReco, "partEvReco[nFSP]/D" );    
- 
+    cafMVA->Branch( "npartEvReco", npartEvReco, "npartEvReco[nFSP]/D" );
   
    
   }
@@ -183,6 +183,7 @@ void CAF::setToBS()
     trkLen[i] = 0.;
     trkLenPerp[i] = 0;
     partEvReco[i] = 0.;
+    npartEvReco[i] = 0.;
   }
 }
 
