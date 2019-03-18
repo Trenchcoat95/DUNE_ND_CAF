@@ -523,9 +523,13 @@ void loop( CAF &caf, params &par, TTree * tree, std::string ghepdir, std::string
 	    
 	    double preco = rando->Gaus( ptrue, ptrue*sig );
 	    double ereco = sqrt( preco*preco + mass*mass ) - mass;
-            if( abs(fsPdg[i]) == 211 ) ereco += mass;
+            double nereco = sqrt( preco*preco + mass*mass ) - mass;
+	    if( abs(fsPdg[i]) == 211 ) ereco += mass;
             else if( fsPdg[i] == 2212 && preco > 1.5 ) ereco += 0.1395; // mistake pion mass for high-energy proton
-            caf.partEvReco[i] = ereco;
+            // neutron energies -- can be removed for the first pass to cafana 
+	    else if( fsPdg[i] == 2112 ) nereco += sqrt( preco*preco + 0.9395*0.9395 ) - 0.9395;
+	    caf.partEvReco[i] = ereco;
+	    caf.npartEvReco[i] = nereco; 
             if( fsTrkLen[i] > par.gastpc_len ) {
               caf.Ev_reco += ereco;
               if( fsPdg[i] == 211 ) caf.gastpc_pi_pl_mult++;
