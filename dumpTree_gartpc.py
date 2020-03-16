@@ -7,6 +7,7 @@ import ROOT
 from optparse import OptionParser
 from array import array
 
+# various top geometry names within active volume of HPgTPC  
 gar_active_vols = ["GArTPC", "TPCChamber", "TPCGas", "cent_elec_shape", "cent_hc_shape", "TPC1_shape", "TPC1pad_shape", "TPC1fc_pvf_shape", "TPC1fc_kev_shape", "TPC2_shape", "TPC2pad_shape", "TPC2fc_pvf_shape", "TPC2fc_kev_shape", "TPC2fc_hc_shape"]
 
 def loop( events, tgeo, tout, nfiles, okruns ):
@@ -17,21 +18,22 @@ def loop( events, tgeo, tout, nfiles, okruns ):
 
     print "Inside event loop with %d files and first run %d" % (nfiles, okruns[0])
 
-    # updated geometry with less steel
+    # correcting for the beam offset
     offset = [ 0., 305., 5. ]
     fvLo = [ -300., -100., 50. ]
     fvHi = [ 300., 100., 450. ]
-    collarLo = [ -320., -120., 30. ]
-    collarHi = [ 320., 120., 470. ]
-
+   
+    # reading edepsim events
     event = ROOT.TG4Event()
     events.SetBranchAddress("Event",ROOT.AddressOf(event))
     print "Set branch address"
+    
+    # gas pion multiplicity variables	
     t_gastpc_pi_pl_mult[0] = 0
     t_gastpc_pi_min_mult[0] = 0
  
     t_nue_tot[0] = 0.0
-    #t_p_true[0] = 0.0
+    t_p_true[0] = 0.0
     m_pi = 139.6
     m_mu = 105.6
     m_e = 0.510
@@ -89,7 +91,7 @@ def loop( events, tgeo, tout, nfiles, okruns ):
 		t_vtx_no_off[i] = vertex.Position[i] / 10.
 
 
-
+	    # fiducial volume currently diabled
             #for i in range(3):
             #    if t_vtx[i] < fvLo[i] or t_vtx[i] > fvHi[i]:
             #        fvCut = True
@@ -123,7 +125,7 @@ def loop( events, tgeo, tout, nfiles, okruns ):
                 t_fsPy[nfsp] = particle.Momentum[1]
                 t_fsPz[nfsp] = particle.Momentum[2]
                 t_fsE[nfsp] = e
-
+		# adding up the truth-level kinetic energies of particles to estimate the neutrion energy
                 fsParticleIdx[particle.TrackId] = nfsp
                 nfsp += 1
                 if abs(particle.PDGCode) in [11,12,13,14]:
