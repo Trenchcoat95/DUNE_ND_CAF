@@ -7,6 +7,7 @@ import ROOT
 from optparse import OptionParser
 from array import array
 
+# list of top volume names in HPgTPC
 gar_active_vols = ["GArTPC", "TPCChamber", "TPCGas", "cent_elec_shape", "cent_hc_shape", "TPC1_shape", "TPC1pad_shape", "TPC1fc_pvf_shape", "TPC1fc_kev_shape", "TPC2_shape", "TPC2pad_shape", "TPC2fc_pvf_shape", "TPC2fc_kev_shape", "TPC2fc_hc_shape"]
 
 def loop( events, tgeo, tout, nfiles, okruns ):
@@ -17,13 +18,13 @@ def loop( events, tgeo, tout, nfiles, okruns ):
 
     print "Inside event loop with %d files and first run %d" % (nfiles, okruns[0])
 
-    
+    # beam offset correction
     offset = [ 0., 305., 5. ]
     fvLo = [ -300., -100., 50. ]
     fvHi = [ 300., 100., 450. ]
     collarLo = [ -320., -120., 30. ]
     collarHi = [ 320., 120., 470. ]
-
+    # read edepsim G4Events
     event = ROOT.TG4Event()
     events.SetBranchAddress("Event",ROOT.AddressOf(event))
     print "Set branch address"
@@ -37,9 +38,13 @@ def loop( events, tgeo, tout, nfiles, okruns ):
         print "AAAAAAAAAAAAAAAAAAAAAAAAHHHHHHHHHHHHHHHHhhhh seriously stop it"
 
     print "Starting loop over %d entries" % N
-    # loop over the number of neutrino inetraction events
+    # loop over the number of neutrino interactions in the file
     for ient in range(N):
-        
+        pi_pl_count = 0
+        pi_min_count = 0
+       
+        nue_tot = 0.0
+
         if ient % 100 == 0:
             print "Event %d of %d..." % (ient,N)
         events.GetEntry(ient)
@@ -47,7 +52,7 @@ def loop( events, tgeo, tout, nfiles, okruns ):
         for ivtx,vertex in enumerate(event.Primaries):
             node_all_prim = tgeo.FindNode(vertex.Position[0], vertex.Position[1],vertex.Position[2])
             volname = node_all_prim.GetName()
-  	    # initialized the tree variables
+  	    # initialize the tree variables
             fileidx = ient/evt_per_file
             t_ifileNo[0] = okruns[fileidx]
             t_ievt[0] = ient%evt_per_file;
@@ -66,16 +71,11 @@ def loop( events, tgeo, tout, nfiles, okruns ):
             t_hadCollar[0] = 0.
             t_nFS[0] = 0
             t_lepstart[0]=0.0; t_lepstart[1]=0.0; t_lepstart[2]=0.0;
-	    t_true_numu[0] = 0
-	    t_true_nue[0] = 0
-	    # record numu events
-	    if vertex.Reaction[0:5] == 'nu:14':
-            	t_true_numu[0]=1        
-	    # record nue events
-	    if vertex.Reaction[0:5] == 'nu:12':
-		t_true_nue[0]=1
-	    # record the vertex
-	    for i in range(3): 
+
+            reaction=vertex.Reaction        
+
+            # set the vertex location for output
+            for i in range(3): 
                 t_vtx[i] = vertex.Position[i] / 10. - offset[i] # cm
            
             for i in range(3):
@@ -94,13 +94,12 @@ def loop( events, tgeo, tout, nfiles, okruns ):
             nfsp = 0
 
             fsParticleIdx = {}
-            # loop over the primary particles
-	    for ipart,particle in enumerate(vertex.Particles):
+	    # loop over the primary particles
+            for ipart,particle in enumerate(vertex.Particles):
                 e = particle.Momentum[3]
                 p = (particle.Momentum[0]**2 + particle.Momentum[1]**2 + particle.Momentum[2]**2)**0.5
-                
-		
-		p_recon = ROOT.gRandom.Gaus(p, p*(0.01))
+                 
+                p_recon = ROOT.gRandom.Gaus(p, p*(0.01))
                 p_recon_pi0 = ROOT.gRandom.Gaus(p, p*(0.10))
                 if particle.PDGCode != 111: 
                     t_p_recon_gen[0] = p_recon
@@ -130,7 +129,7 @@ def loop( events, tgeo, tout, nfiles, okruns ):
             t_nFS[0] = nfsp
            
 
-            # If there is a muon, determine its exiting momentum and position
+            # If there is a muon, determine how to its momentum and where it exits
             muexit = 0
             exitKE = 0.
             exitP = None
@@ -179,16 +178,16 @@ def loop( events, tgeo, tout, nfiles, okruns ):
 
                 endVolName = node.GetName()
 
-		# determine the volume name where the muon stops in
+		# record which detector volume does the muon end up in
                 if "volWorld" in endVolName or "volDetEnclosure" in endVolName: endVolIdx = 0 # outside detector components
                 if "TPC1_PV_0" == volName or "TPC2_PV_0" == volName: 
                         endVolIdx = 1 # active GAr
 
-                if "Endcap" in endVolName or "Yoke" in endVolName: endVolIdx = 2 # "Passive" GAr
+                if "Endcap" in endVolName or "Yoke" in endVolName: endVolIdx = 2 # Passive component of GAr
                 if "Tile" in endVolName: endVolIdx = 3
 
                 hits = []
-                # loop over the energy losses in active volume of the TPC
+                # record the track length and energy loss in the HPgTPC volume
                 for key in event.SegmentDetectors:
                
         
@@ -213,8 +212,7 @@ def loop( events, tgeo, tout, nfiles, okruns ):
                         hits += key.second
             collar_energy = 0.
             total_energy = 0.
-            energy_dep = [0. for i in range(nfsp)]
-	    track_length = [0. for i in range(nfsp)]
+            track_length = [0. for i in range(nfsp)]
             track_length_perp = [0. for i in range(nfsp)]
             for hit in hits:
                 hStart = ROOT.TVector3( hit.Start[0]/10.-offset[0], hit.Start[1]/10.-offset[1], hit.Start[2]/10.-offset[2] )
@@ -224,8 +222,7 @@ def loop( events, tgeo, tout, nfiles, okruns ):
                 if event.Trajectories[hit.PrimaryId].ParentId == -1:
                     track_length[fsParticleIdx[hit.PrimaryId]] += (hStop-hStart).Mag()
                     track_length_perp[fsParticleIdx[hit.PrimaryId]] += (hStopYZ-hStartYZ).Mag()
-        	    energy_dep[fsParticleIdx[hit.PrimaryId]] += hit.EnergyDeposit    
-	    # below is to be ignored for gas TPC
+                # below is to be ignored for gas TPC
                 if hit.PrimaryId != ileptraj:
                     hStart = ROOT.TVector3( hit.Start[0]/10.-offset[0], hit.Start[1]/10.-offset[1], hit.Start[2]/10.-offset[2] )
                     total_energy += hit.EnergyDeposit
@@ -238,7 +235,6 @@ def loop( events, tgeo, tout, nfiles, okruns ):
             for i in range(nfsp):
                 t_fsTrkLen[i] = track_length[i]
                 t_fsTrkLenPerp[i] = track_length_perp[i]
-		t_tot_energy[i] = energy_dep[i]
 
             tout.Fill()
 
@@ -331,16 +327,6 @@ if __name__ == "__main__":
     t_lepstart = array('f',3*[0.0])
     tout.Branch('lepstart',t_lepstart,'lepstart[3]/F')
     
-    t_tot_energy = array('f',100*[0.])
-    tout.Branch('tot_energy',t_tot_energy,'tot_energy[nFS]/F')
-    
-    
-    t_true_numu = array('i',[0])
-    tout.Branch('true_numu',t_true_numu,'true_numu/I')
-    
-    t_true_nue = array('i',[0])
-    tout.Branch('true_nue',t_true_nue,'true_nue/I')
-
     t_nue_tot = array('f',[0.])
     tout.Branch('nue_tot',t_nue_tot,'nue_tot')
     loaded = False
@@ -395,6 +381,8 @@ if __name__ == "__main__":
 
     fout.cd()
     tout.Write()
+
+
 
 
 
